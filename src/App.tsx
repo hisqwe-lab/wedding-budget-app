@@ -218,6 +218,10 @@ export default function App() {
     return { total, expectedExpense, paid };
   }, [items]);
 
+  const activeCategoryTotal = useMemo(() => {
+    return filteredItems.reduce((acc, item) => acc + (Number(item.totalCost) || 0), 0);
+  }, [filteredItems]);
+
   // --- 월별 모으기 계산 로직 (D-day 기반 자동 차감) ---
   const savingsPlan = useMemo(() => {
     const remainingCost = summary.expectedExpense; // 갚아야 할 잔금 총액
@@ -473,6 +477,10 @@ export default function App() {
 
       {/* List */}
       <div className="px-4 space-y-3 py-4">
+        <div className="flex justify-between items-end px-1 mb-2">
+          <span className="text-xs text-gray-500 font-medium">{activeTab} 항목</span>
+          <span className="text-sm font-bold text-gray-800">합계: <span className="text-pink-600">{formatNum(activeCategoryTotal)}</span>원</span>
+        </div>
         {filteredItems.length === 0 ? (
           <div className="text-center py-12 text-gray-400">
             <Wallet className="mx-auto mb-3 opacity-20" size={48} />
