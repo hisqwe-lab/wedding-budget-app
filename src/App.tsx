@@ -68,7 +68,7 @@ export default function App() {
     'artifacts',
     appId,
     'users',
-    user.uid,
+    '80XEtJzndPa7W1lmDpREcjOjIEd2',
     'weddingExpenses'
   );
 
@@ -93,7 +93,7 @@ export default function App() {
     'artifacts',
     appId,
     'users',
-    user.uid,
+    '80XEtJzndPa7W1lmDpREcjOjIEd2',
     'settings',
     'budget'
   );
@@ -149,7 +149,14 @@ export default function App() {
   useEffect(() => {
     if (!user) return;
 
-    const itemsRef = collection(db, 'artifacts', appId, 'users', user.uid, 'weddingExpenses');
+    const itemsRef = collection(
+  db,
+  'artifacts',
+  appId,
+  'sharedRooms',
+  SHARED_ROOM_ID,
+  'weddingExpenses'
+);
     const unsubscribeItems = onSnapshot(itemsRef, 
       (snapshot) => {
         const fetchedItems = snapshot.docs.map(doc => ({
@@ -167,7 +174,15 @@ export default function App() {
 
     const fetchSettings = async () => {
       try {
-        const docRef = doc(db, 'artifacts', appId, 'users', user.uid, 'settings', 'budget');
+        const docRef = doc(
+  db,
+  'artifacts',
+  appId,
+  'sharedRooms',
+  SHARED_ROOM_ID,
+  'settings',
+  'budget'
+);
         const docSnap = await getDoc(docRef);
         if (docSnap.exists()) {
           const data = docSnap.data();
@@ -240,7 +255,15 @@ export default function App() {
   const saveBudgetSettings = async () => {
     if (!user) return;
     try {
-      const docRef = doc(db, 'artifacts', appId, 'users', user.uid, 'settings', 'budget');
+      const docRef = doc(
+  db,
+  'artifacts',
+  appId,
+  'sharedRooms',
+  SHARED_ROOM_ID,
+  'settings',
+  'budget'
+);
       await setDoc(docRef, { 
         expectedGift: Number(expectedGift) || 0,
         currentSavings: Number(currentSavings) || 0
@@ -308,7 +331,14 @@ export default function App() {
     };
 
     try {
-      const itemsRef = collection(db, 'artifacts', appId, 'users', user.uid, 'weddingExpenses');
+      const itemsRef = collection(
+  db,
+  'artifacts',
+  appId,
+  'sharedRooms',
+  SHARED_ROOM_ID,
+  'weddingExpenses'
+);
       if (editingId) {
         await updateDoc(doc(itemsRef, editingId), payload);
       } else {
@@ -324,7 +354,15 @@ export default function App() {
     if (!user || !editingId) return;
     if (!deleteConfirm) { setDeleteConfirm(true); return; }
     try {
-      await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'weddingExpenses', editingId));
+      await deleteDoc(doc(
+  db,
+  'artifacts',
+  appId,
+  'sharedRooms',
+  SHARED_ROOM_ID,
+  'weddingExpenses',
+  editingId
+));
       closeModal();
     } catch (error) {
       console.error("Error deleting document: ", error);
