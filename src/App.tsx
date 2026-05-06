@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { Plus, X, Trash2, Calendar, Wallet, Check, AlertCircle, PiggyBank, Coins } from 'lucide-react';
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
-import { getFirestore, collection, onSnapshot, doc, addDoc, updateDoc, deleteDoc, setDoc, getDoc } from 'firebase/firestore';
+import { getFirestore, collection, onSnapshot, doc, addDoc, updateDoc, deleteDoc, setDoc, getDoc, getDocs, writeBatch } from 'firebase/firestore';
 
 // --- Firebase Initialization ---
 const firebaseConfig = {
@@ -19,6 +19,7 @@ const auth = getAuth(app);
 const db = getFirestore(app);
 
 const appId = "wedding-budget-app";
+const SHARED_ROOM_ID = "wedding-2026-karon-8f3a9x";
 
 const CATEGORIES = ['전체', '본식', '스튜디오', '드레스/예복', '메이크업', '신혼여행', '결혼반지', '기타'];
 const INPUT_CATEGORIES = CATEGORIES.slice(1);
@@ -54,6 +55,69 @@ const InputGroup = ({ label, name, type = 'text', placeholder = '', icon: Icon, 
 
 export default function App() {
   const [user, setUser] = useState(null);
+  const migrateMyDataToSharedRoom = async () => {
+  if (!user) {
+    alert("아직 로그인 사용자가 없습니다.");
+    return;
+  }
+
+  const batch = writeBatch(db);
+
+  const oldItemsRef = collection(
+    db,
+    'artifacts',
+    appId,
+    'users',
+    user.uid,
+    'weddingExpenses'
+  );
+
+  const newItemsRef = collection(
+    db,
+    'artifacts',
+    appId,
+    'sharedRooms',
+    SHARED_ROOM_ID,
+    'weddingExpenses'
+  );
+
+  const snapshot = await getDocs(oldItemsRef);
+
+  snapshot.forEach((document) => {
+    const newDocRef = doc(newItemsRef, document.id);
+    batch.set(newDocRef, document.data());
+  });
+
+  const oldBudgetRef = doc(
+    db,
+    'artifacts',
+    appId,
+    'users',
+    user.uid,
+    'settings',
+    'budget'
+  );
+
+  const newBudgetRef = doc(
+    db,
+    'artifacts',
+    appId,
+    'sharedRooms',
+    SHARED_ROOM_ID,
+    'settings',
+    'budget'
+  );
+
+  const budgetSnapshot = await getDoc(oldBudgetRef);
+
+  if (budgetSnapshot.exists()) {
+    batch.set(newBudgetRef, budgetSnapshot.data());
+  }
+
+  await batch.commit();
+
+  alert(`공유방으로 데이터 복사 완료: ${snapshot.size}개`);
+};
   const [items, setItems] = useState([]);
   const [expectedGift, setExpectedGift] = useState(''); // 예상 축의금
   const [currentSavings, setCurrentSavings] = useState(''); // 현재 모은 금액 추가
@@ -271,7 +335,12 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-gray-50 pb-24 font-sans text-gray-900 mx-auto max-w-md relative shadow-xl overflow-hidden">
-      
+         <button
+      onClick={migrateMyDataToSharedRoom}
+      className="m-4 bg-black text-white px-4 py-2 rounded-xl text-sm"
+    >
+      공유방으로 데이터 복사
+    </button>
       {/* Header & Summary */}
       <div className="bg-white px-5 pt-6 pb-5 rounded-b-3xl shadow-sm z-10 relative">
         <h1 className="text-xl font-bold text-gray-800 mb-4">결혼식 비용 관리 💍</h1>
