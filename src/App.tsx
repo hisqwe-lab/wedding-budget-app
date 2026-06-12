@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   Plus, X, Trash2, Calendar, Wallet, Check, AlertCircle, 
   PiggyBank, Coins, Settings, ChevronRight, BarChart2, Info, FileText, UploadCloud
@@ -100,6 +100,447 @@ const parseNum = (str) => {
   return str.toString().replace(/[^\d]/g, '');
 };
 
+// --- CSV 파싱 및 변환 유틸리티 ---
+const cleanCsvText = (value) => {
+  if (value === null || value === undefined) return '';
+  return String(value).replace(/^\uFEFF/, '').trim();
+};
+
+const normalizeCsvKey = (value) => {
+  return cleanCsvText(value)
+    .toLowerCase()
+    .replace(/[\s_\-\/()[\]{}.:]/g, '');
+};
+
+const parseCsvMoney = (value) => {
+  const text = cleanCsvText(value);
+  if (!text || text === '-') return 0;
+
+  const isNegative = /^\(.*\)$/.test(text) || text.startsWith('-');
+  const digits = text.replace(/[^\d.]/g, '');
+  if (!digits) return 0;
+
+  const number = Number(digits);
+  if (!Number.isFinite(number)) return 0;
+  return isNegative ? -number : number;
+};
+
+const normalizeCsvDate = (value) => {
+  const text = cleanCsvText(value);
+  if (!text || text === '-') return '';
+
+  const match = text.match(/(\d{4})[.\-/년\s]+(\d{1,2})[.\-/월\s]+(\d{1,2})/);
+  if (match) {
+    const year = match[1];
+    const month = String(Number(match[2])).padStart(2, '0');
+    const day = String(Number(match[3])).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  }
+
+  const compact = text.match(/^(\d{4})(\d{2})(\d{2})$/);
+  if (compact) {
+    return `${compact[1]}-${compact[2]}-${compact[3]}`;
+  }
+
+  return '';
+};
+
+const normalizeCsvCategory = (value) => {
+  const text = cleanCsvText(value).replace(/\s+/g, '');
+
+  if (!text) return '';
+  if (text.includes('본식')) return '본식';
+  if (text.includes('스튜디오')) return '스튜디오';
+  if (text.includes('드레스') || text.includes('예복')) return '드레스/예복';
+  if (text.includes('메이크업')) return '메이크업';
+  if (text.includes('신혼여행')) return '신혼여행';
+  if (text.includes('결혼반지') || text.includes('웨딩반지')) return '결혼반지';
+  if (text.includes('기타')) return '기타';
+
+  return '기타';
+};
+
+const parseCsvRows = (csvText) => {
+  const text = String(csvText || '').replace(/^\uFEFF/, '');
+  const rows = [];
+  let row = [];
+  let field = '';
+  let inQuotes = false;
+
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+
+    if (char === '"') {
+      if (inQuotes && text[index + 1] === '"') {
+        field += '"';
+        index += 1;
+      } else {
+        inQuotes = !inQuotes;
+      }
+      continue;
+    }
+
+    if (char === ',' && !inQuotes) {
+      row.push(field);
+      field = '';
+      continue;
+    }
+
+    if ((char === '\n' || char === '\r') && !inQuotes) {
+      if (char === '\r' && text[index + 1] === '\n') {
+        index += 1;
+      }
+
+      row.push(field);
+      field = '';
+
+      if (row.some(cell => cleanCsvText(cell) !== '')) {
+        rows.push(row);
+      }
+      row = [];
+      continue;
+    }
+
+    field += char;
+  }
+
+  row.push(field);
+  if (row.some(cell => cleanCsvText(cell) !== '')) {
+    rows.push(row);
+  }
+
+  return rows;
+};
+
+const decodeCsvFile = async (file) => {
+  const buffer = await file.arrayBuffer();
+  const bytes = new Uint8Array(buffer);
+
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch (utf8Error) {
+    try {
+      return new TextDecoder('euc-kr').decode(bytes);
+    } catch (eucKrError) {
+      throw new Error('CSV 파일 인코딩을 읽을 수 없습니다. UTF-8 CSV로 다시 저장해 주세요.');
+    }
+  }
+};
+
+const joinUniqueCsvValues = (values, separator = ' / ') => {
+  const uniqueValues = [];
+
+  values.forEach((value) => {
+    const cleaned = cleanCsvText(value);
+    if (cleaned && !uniqueValues.includes(cleaned)) {
+      uniqueValues.push(cleaned);
+    }
+  });
+
+  return uniqueValues.join(separator);
+};
+
+const hashCsvFileName = (fileName) => {
+  let hash = 0;
+  const text = String(fileName || 'csv-file');
+
+  for (let index = 0; index < text.length; index += 1) {
+    hash = ((hash << 5) - hash) + text.charCodeAt(index);
+    hash |= 0;
+  }
+
+  return Math.abs(hash).toString(36);
+};
+
+const parseWeddingBudgetCsv = (rows) => {
+  const headerIndex = rows.findIndex((row) => (
+    normalizeCsvKey(row[0]) === '구분'
+    && normalizeCsvKey(row[1]) === '세부항목'
+  ));
+
+  if (headerIndex === -1) return null;
+
+  const parsedItems = [];
+  let currentCategory = '';
+  let groupRows = [];
+  let groupHasAmount = false;
+
+  const flushGroup = () => {
+    if (!currentCategory || groupRows.length === 0) {
+      groupRows = [];
+      groupHasAmount = false;
+      return;
+    }
+
+    const titleParts = groupRows
+      .map(row => cleanCsvText(row[1]))
+      .filter(Boolean);
+
+    const companyParts = groupRows
+      .map(row => cleanCsvText(row[2]))
+      .filter(Boolean);
+
+    const genericTitles = ['필수별도', '선택별도'];
+    let title = joinUniqueCsvValues(titleParts);
+    let company = joinUniqueCsvValues(companyParts);
+
+    if ((!title || genericTitles.includes(title)) && company) {
+      title = title ? `${title} - ${company}` : company;
+      company = '';
+    }
+
+    if (!title) {
+      title = currentCategory;
+    }
+
+    const lastNonEmptyCell = (columnIndex) => {
+      for (let index = groupRows.length - 1; index >= 0; index -= 1) {
+        const value = cleanCsvText(groupRows[index][columnIndex]);
+        if (value !== '') return value;
+      }
+      return '';
+    };
+
+    const firstDateCell = (columnIndex) => {
+      for (let index = 0; index < groupRows.length; index += 1) {
+        const date = normalizeCsvDate(groupRows[index][columnIndex]);
+        if (date) return date;
+      }
+      return '';
+    };
+
+    const totalCostCell = lastNonEmptyCell(3);
+    const depositCell = lastNonEmptyCell(4);
+    const balanceCell = lastNonEmptyCell(6) || lastNonEmptyCell(8);
+
+    let totalCost = parseCsvMoney(totalCostCell);
+    const deposit = parseCsvMoney(depositCell);
+    let balance = parseCsvMoney(balanceCell);
+
+    if (!cleanCsvText(balanceCell) && totalCost > 0) {
+      balance = Math.max(0, totalCost - deposit);
+    }
+
+    if (totalCost === 0 && (deposit > 0 || balance > 0)) {
+      totalCost = deposit + balance;
+    }
+
+    const note = joinUniqueCsvValues(
+      groupRows.map(row => cleanCsvText(row[10])),
+      ' | '
+    );
+
+    const task = joinUniqueCsvValues(
+      groupRows.map(row => cleanCsvText(row[11])),
+      ' | '
+    );
+
+    const paymentMethod = joinUniqueCsvValues(
+      groupRows.map(row => cleanCsvText(row[9]))
+    );
+
+    parsedItems.push({
+      category: currentCategory,
+      title,
+      company,
+      totalCost,
+      deposit,
+      depositDate: firstDateCell(5),
+      balance,
+      balanceDate: firstDateCell(7),
+      paymentMethod,
+      note,
+      task
+    });
+
+    groupRows = [];
+    groupHasAmount = false;
+  };
+
+  for (let rowIndex = headerIndex + 1; rowIndex < rows.length; rowIndex += 1) {
+    const row = [...rows[rowIndex]];
+    while (row.length < 12) row.push('');
+
+    const firstCell = cleanCsvText(row[0]);
+    const isSecondHeaderRow = normalizeCsvKey(row[4]) === '금액'
+      && normalizeCsvKey(row[5]) === '일자';
+
+    if (isSecondHeaderRow) continue;
+
+    const isSubtotalOrTotal = firstCell.includes('소계')
+      || firstCell.includes('결혼 총 비용')
+      || firstCell.includes('결혼총비용');
+
+    if (isSubtotalOrTotal) {
+      flushGroup();
+      continue;
+    }
+
+    if (firstCell) {
+      const nextCategory = normalizeCsvCategory(firstCell);
+
+      if (nextCategory !== currentCategory) {
+        flushGroup();
+        currentCategory = nextCategory;
+      }
+    }
+
+    if (!currentCategory) continue;
+
+    const hasRowContent = row.some(cell => cleanCsvText(cell) !== '');
+    if (!hasRowContent) continue;
+
+    const hasAmountMarker = [3, 4, 6, 8]
+      .some(columnIndex => cleanCsvText(row[columnIndex]) !== '');
+
+    if (hasAmountMarker && groupHasAmount) {
+      flushGroup();
+    }
+
+    groupRows.push(row);
+
+    if (hasAmountMarker) {
+      groupHasAmount = true;
+    }
+  }
+
+  flushGroup();
+  return parsedItems;
+};
+
+const parseStandardBudgetCsv = (rows) => {
+  const aliases = {
+    category: ['category', '카테고리', '구분'],
+    title: ['title', '제목', '항목명', '세부항목', '지출항목', '지출항목명'],
+    company: ['company', '업체', '업체명'],
+    totalCost: ['totalcost', '총비용', '총계약합계액', '합계', '금액'],
+    deposit: ['deposit', '계약금', '기납부계약금'],
+    depositDate: ['depositdate', '계약금일자', '계약금결제일'],
+    balance: ['balance', '잔금', '납부대기잔금', '지출예정'],
+    balanceDate: ['balancedate', '잔금일자', '잔금지불예정일', '지출예정일'],
+    paymentMethod: ['paymentmethod', '결제수단', '결제방법'],
+    note: ['note', '비고', '메모', '참고사항', '상세기록'],
+    task: ['task', '숙제', '할일']
+  };
+
+  const normalizedAliases = Object.fromEntries(
+    Object.entries(aliases).map(([field, fieldAliases]) => [
+      field,
+      fieldAliases.map(alias => normalizeCsvKey(alias))
+    ])
+  );
+
+  const headerIndex = rows.findIndex((row) => {
+    const keys = row.map(cell => normalizeCsvKey(cell));
+    const hasCategory = keys.some(key => normalizedAliases.category.includes(key));
+    const hasTitle = keys.some(key => normalizedAliases.title.includes(key));
+    return hasCategory && hasTitle;
+  });
+
+  if (headerIndex === -1) {
+    throw new Error(
+      'CSV 머리글을 찾지 못했습니다. "구분, 세부항목, 업체명, 총 비용..." 형식 또는 category, title 형식을 사용해 주세요.'
+    );
+  }
+
+  const headerRow = rows[headerIndex].map(cell => normalizeCsvKey(cell));
+  const columnMap = {};
+
+  Object.entries(normalizedAliases).forEach(([field, fieldAliases]) => {
+    columnMap[field] = headerRow.findIndex(header => fieldAliases.includes(header));
+  });
+
+  if (columnMap.title === -1) {
+    throw new Error('CSV에 세부항목 또는 title 열이 없습니다.');
+  }
+
+  const getCell = (row, field) => {
+    const index = columnMap[field];
+    return index >= 0 ? cleanCsvText(row[index]) : '';
+  };
+
+  const parsedItems = [];
+  let currentCategory = '기타';
+
+  for (let rowIndex = headerIndex + 1; rowIndex < rows.length; rowIndex += 1) {
+    const row = rows[rowIndex];
+    const categoryCell = getCell(row, 'category');
+    const titleCell = getCell(row, 'title');
+
+    if (categoryCell.includes('소계') || categoryCell.includes('총 비용')) {
+      continue;
+    }
+
+    if (categoryCell) {
+      currentCategory = normalizeCsvCategory(categoryCell);
+    }
+
+    const companyCell = getCell(row, 'company');
+    const totalCostCell = getCell(row, 'totalCost');
+    const depositCell = getCell(row, 'deposit');
+    const balanceCell = getCell(row, 'balance');
+
+    let title = titleCell;
+    let company = companyCell;
+
+    if (!title && company) {
+      title = company;
+      company = '';
+    }
+
+    if (!title) continue;
+
+    let totalCost = parseCsvMoney(totalCostCell);
+    const deposit = parseCsvMoney(depositCell);
+    let balance = parseCsvMoney(balanceCell);
+
+    if (!balanceCell && totalCost > 0) {
+      balance = Math.max(0, totalCost - deposit);
+    }
+
+    if (totalCost === 0 && (deposit > 0 || balance > 0)) {
+      totalCost = deposit + balance;
+    }
+
+    parsedItems.push({
+      category: currentCategory,
+      title,
+      company,
+      totalCost,
+      deposit,
+      depositDate: normalizeCsvDate(getCell(row, 'depositDate')),
+      balance,
+      balanceDate: normalizeCsvDate(getCell(row, 'balanceDate')),
+      paymentMethod: getCell(row, 'paymentMethod'),
+      note: getCell(row, 'note'),
+      task: getCell(row, 'task')
+    });
+  }
+
+  return parsedItems;
+};
+
+const convertCsvRowsToBudgetItems = (rows) => {
+  if (!Array.isArray(rows) || rows.length === 0) {
+    throw new Error('CSV 파일에 데이터가 없습니다.');
+  }
+
+  const weddingBudgetItems = parseWeddingBudgetCsv(rows);
+  const parsedItems = weddingBudgetItems ?? parseStandardBudgetCsv(rows);
+
+  const validItems = parsedItems.filter(item => (
+    cleanCsvText(item.title) !== ''
+    && INPUT_CATEGORIES.includes(item.category)
+  ));
+
+  if (validItems.length === 0) {
+    throw new Error('등록할 수 있는 예산 항목을 CSV에서 찾지 못했습니다.');
+  }
+
+  return validItems;
+};
+
+
 const InputGroup = ({ label, name, type = 'text', placeholder = '', icon: Icon, isNumber, value, onChange }) => (
   <div className="mb-4">
     <label className="block text-sm font-semibold text-gray-700 mb-1">{label}</label>
@@ -138,6 +579,11 @@ export default function App() {
   const [editingId, setEditingId] = useState(null);
   const [formData, setFormData] = useState(getInitialFormData());
   const [deleteConfirm, setDeleteConfirm] = useState(false);
+
+  // CSV 업로드 state
+  const csvInputRef = useRef(null);
+  const [csvImporting, setCsvImporting] = useState(false);
+  const [csvFileName, setCsvFileName] = useState('');
 
   // Custom Toast state
   const [toast, setToast] = useState({ visible: false, message: '', type: 'success' });
@@ -328,6 +774,152 @@ export default function App() {
     }
   };
 
+
+  // CSV 파일 선택창 열기
+  const openCsvFilePicker = () => {
+    if (csvImporting) return;
+    csvInputRef.current?.click();
+  };
+
+  // CSV 파일을 읽어서 Firestore에 등록
+  const handleCsvFileChange = async (event) => {
+    const file = event.target.files?.[0];
+
+    if (!file) return;
+
+    setCsvFileName(file.name);
+
+    if (!user) {
+      showToast('로그인이 완료되지 않았습니다.', 'error');
+      event.target.value = '';
+      return;
+    }
+
+    const isCsvFile = file.name.toLowerCase().endsWith('.csv')
+      || file.type === 'text/csv'
+      || file.type === 'application/vnd.ms-excel';
+
+    if (!isCsvFile) {
+      showToast('CSV 파일만 선택할 수 있습니다.', 'error');
+      event.target.value = '';
+      return;
+    }
+
+    if (file.size > 5 * 1024 * 1024) {
+      showToast('CSV 파일은 5MB 이하만 업로드할 수 있습니다.', 'error');
+      event.target.value = '';
+      return;
+    }
+
+    setCsvImporting(true);
+
+    try {
+      const csvText = await decodeCsvFile(file);
+      const rows = parseCsvRows(csvText);
+      const csvItems = convertCsvRowsToBudgetItems(rows);
+
+      const itemsRef = collection(
+        db,
+        'artifacts',
+        appId,
+        'public',
+        'data',
+        'weddingExpenses'
+      );
+
+      // 같은 이름의 CSV를 다시 올리면 이전 CSV 등록분을 지우고 새 내용으로 교체
+      const existingSnapshot = await getDocs(itemsRef);
+      const previousCsvDocs = existingSnapshot.docs.filter((document) => {
+        const data = document.data();
+        return data.roomId === SHARED_ROOM_ID
+          && data.sourceType === 'csv'
+          && data.sourceFileName === file.name;
+      });
+
+      const now = new Date().toISOString();
+      const fileHash = hashCsvFileName(`${SHARED_ROOM_ID}_${file.name}`);
+      const operations = [];
+
+      previousCsvDocs.forEach((document) => {
+        operations.push({
+          type: 'delete',
+          ref: document.ref
+        });
+      });
+
+      csvItems.forEach((item, index) => {
+        const documentId = `csv_${fileHash}_${String(index + 1).padStart(4, '0')}`;
+        const documentRef = doc(itemsRef, documentId);
+
+        operations.push({
+          type: 'set',
+          ref: documentRef,
+          data: {
+            ...item,
+            roomId: SHARED_ROOM_ID,
+            sourceType: 'csv',
+            sourceFileName: file.name,
+            sourceRow: index + 1,
+            createdAt: now,
+            updatedAt: now
+          }
+        });
+      });
+
+      // Firestore batch 제한을 고려해 450개씩 나누어 저장
+      const operationChunkSize = 450;
+
+      for (
+        let startIndex = 0;
+        startIndex < operations.length;
+        startIndex += operationChunkSize
+      ) {
+        const batch = writeBatch(db);
+        const operationChunk = operations.slice(
+          startIndex,
+          startIndex + operationChunkSize
+        );
+
+        operationChunk.forEach((operation) => {
+          if (operation.type === 'delete') {
+            batch.delete(operation.ref);
+          } else {
+            batch.set(operation.ref, operation.data);
+          }
+        });
+
+        await batch.commit();
+      }
+
+      showToast(
+        `${file.name}에서 ${csvItems.length}개의 예산 항목을 등록했습니다.`,
+        'success'
+      );
+      setIsSettingsOpen(false);
+    } catch (error) {
+      console.error('CSV Upload Error:', error);
+      console.error('Firebase error code:', error?.code);
+      console.error('Firebase error message:', error?.message);
+
+      if (error?.code === 'permission-denied') {
+        showToast(
+          'CSV 저장 권한이 없습니다. Firestore 규칙의 쓰기 권한을 확인해 주세요.',
+          'error'
+        );
+      } else if (error?.code === 'unauthenticated') {
+        showToast('Firebase 로그인이 완료되지 않았습니다.', 'error');
+      } else {
+        showToast(
+          error?.message || 'CSV 파일을 처리하는 중 오류가 발생했습니다.',
+          'error'
+        );
+      }
+    } finally {
+      setCsvImporting(false);
+      event.target.value = '';
+    }
+  };
+
   // 이미지 엑셀 데이터 통째로 복사해넣기 (원터치 자동 등록기)
   const loadExcelMockData = async () => {
     if (!user) {
@@ -507,7 +1099,14 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-gray-50 pb-28 font-sans text-gray-900 mx-auto max-w-md relative shadow-xl overflow-hidden border-x border-gray-100 flex flex-col">
-      
+      <input
+        ref={csvInputRef}
+        type="file"
+        accept=".csv,text/csv,application/vnd.ms-excel"
+        onChange={handleCsvFileChange}
+        className="hidden"
+      />
+
       {/* Toast Alert UI */}
       {toast.visible && (
         <div className="fixed top-5 left-1/2 -translate-x-1/2 z-50 w-[90%] max-w-xs bg-gray-900/95 backdrop-blur text-white px-4 py-3 rounded-2xl shadow-2xl flex items-center gap-2 text-xs transition-all duration-300 transform animate-slide-up">
@@ -678,15 +1277,31 @@ export default function App() {
             <Wallet className="mx-auto mb-3 opacity-10 text-gray-900" size={56} />
             <p className="text-sm font-semibold text-gray-500">등록된 지출 내역이 비어 있습니다.</p>
             <p className="text-xs text-gray-400 mt-1.5 leading-relaxed">
-              오른쪽 위 <b className="text-pink-500">톱니바퀴</b>를 누르시거나 아래 버튼을 통해 <br />
-              <b>전송된 이미지 예산 명세서</b>를 한번에 복사해 오실 수 있습니다! 🚀
+              CSV 파일을 선택하면 예산 항목을 분석해서 <br />
+              현재 공유방에 자동으로 등록합니다.
             </p>
-            <button
-              onClick={loadExcelMockData}
-              className="mt-5 mx-auto bg-pink-100 hover:bg-pink-200 text-pink-700 font-black px-5 py-2.5 rounded-2xl text-xs flex items-center gap-1.5 transition-colors"
-            >
-              <UploadCloud size={14} /> 이미지 엑셀명세 자동 가져오기
-            </button>
+
+            <div className="mt-5 flex flex-col gap-2">
+              <button
+                onClick={openCsvFilePicker}
+                disabled={csvImporting}
+                className={`mx-auto w-full max-w-[250px] font-black px-5 py-2.5 rounded-2xl text-xs flex items-center justify-center gap-1.5 transition-colors ${
+                  csvImporting
+                    ? 'bg-gray-200 text-gray-400 cursor-not-allowed'
+                    : 'bg-sky-100 hover:bg-sky-200 text-sky-700'
+                }`}
+              >
+                <FileText size={14} />
+                {csvImporting ? 'CSV 등록 중...' : 'CSV 파일 업로드'}
+              </button>
+
+              <button
+                onClick={loadExcelMockData}
+                className="mx-auto w-full max-w-[250px] bg-pink-100 hover:bg-pink-200 text-pink-700 font-black px-5 py-2.5 rounded-2xl text-xs flex items-center justify-center gap-1.5 transition-colors"
+              >
+                <UploadCloud size={14} /> 이미지 엑셀명세 자동 가져오기
+              </button>
+            </div>
           </div>
         ) : (
           filteredItems.map(item => (
@@ -771,6 +1386,37 @@ export default function App() {
                   />
                 </div>
                 <p className="text-[10px] text-gray-400 mt-1">입력된 날짜를 기준으로 매달 저축해야 할 금액을 정밀 연산합니다.</p>
+              </div>
+
+              {/* CSV File Upload Action */}
+              <div className="bg-sky-50 rounded-2xl p-4.5 border border-sky-100">
+                <span className="text-xs font-bold text-sky-800 flex items-center gap-1.5 mb-1">
+                  📄 CSV 예산 파일 가져오기
+                </span>
+                <p className="text-[11px] text-sky-700 leading-relaxed mb-3">
+                  웨딩 예산 CSV를 선택하면 구분, 세부항목, 업체명, 총 비용,
+                  계약금, 잔금, 결제수단, 비고를 자동으로 읽어 현재 공유방에 등록합니다.
+                  같은 파일명을 다시 올리면 그 파일로 등록했던 항목만 새 내용으로 교체합니다.
+                </p>
+
+                {csvFileName && (
+                  <p className="text-[10px] text-sky-600 font-semibold mb-2 break-all">
+                    최근 선택 파일: {csvFileName}
+                  </p>
+                )}
+
+                <button
+                  onClick={openCsvFilePicker}
+                  disabled={csvImporting}
+                  className={`w-full text-white font-black py-2.5 px-4 rounded-xl text-xs transition-colors shadow-sm flex items-center justify-center gap-1.5 ${
+                    csvImporting
+                      ? 'bg-gray-400 cursor-not-allowed'
+                      : 'bg-sky-500 hover:bg-sky-600'
+                  }`}
+                >
+                  <FileText size={14} />
+                  {csvImporting ? 'CSV 분석 및 등록 중...' : 'CSV 파일 선택 후 등록하기'}
+                </button>
               </div>
 
               {/* Upload Excel Data Action */}
