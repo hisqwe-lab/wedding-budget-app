@@ -830,29 +830,37 @@ export default function App() {
     const targetAmount = Math.max(0, remainingCost - gift - saved);
     
     const currentDate = new Date();
-    const currentYear = currentDate.getFullYear();
-    const currentMonth = currentDate.getMonth(); // 0-11
+    const currentDay = currentDate.getDate();
+
+    // 매월 10일을 기준으로 월평균 저축액 계산
+    // 1일~9일: 필요한 준비액 ÷ 9
+    // 10일 이후: 필요한 준비액 ÷ 8
+    const effectiveMonths = currentDay < 10 ? 9 : 8;
+    const monthlyTarget = Math.ceil(targetAmount / effectiveMonths);
     
     const targetDateObj = new Date(weddingDate);
     if (isNaN(targetDateObj.getTime())) {
-      return { targetAmount, monthsLeft: 1, monthlyTarget: targetAmount, isPassed: false, dDay: 0 };
+      return {
+        targetAmount,
+        monthsLeft: effectiveMonths,
+        monthlyTarget,
+        isPassed: false,
+        dDay: 0
+      };
     }
 
     // 디데이 계산
     const diffTime = targetDateObj - currentDate;
     const dDay = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-
-    const targetYear = targetDateObj.getFullYear();
-    const targetMonth = targetDateObj.getMonth() - 1; // 결혼식 전월까지 모으기
+    const isPassed = dDay < 0;
     
-    // 남은 개월 수 계산 (현재 달 포함)
-    let monthsLeft = (targetYear - currentYear) * 12 + (targetMonth - currentMonth);
-    const isPassed = monthsLeft < 0;
-    
-    const effectiveMonths = Math.max(1, monthsLeft + 1);
-    const monthlyTarget = Math.ceil(targetAmount / effectiveMonths);
-    
-    return { targetAmount, monthsLeft: effectiveMonths, monthlyTarget, isPassed, dDay };
+    return {
+      targetAmount,
+      monthsLeft: effectiveMonths,
+      monthlyTarget,
+      isPassed,
+      dDay
+    };
   }, [summary.expectedExpense, expectedGift, currentSavings, weddingDate]);
 
   // --- Handlers ---
