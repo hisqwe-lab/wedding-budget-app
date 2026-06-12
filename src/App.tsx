@@ -100,6 +100,54 @@ const parseNum = (str) => {
   return str.toString().replace(/[^\d]/g, '');
 };
 
+// YYYY-MM-DD 문자열을 브라우저 시간대의 날짜로 안전하게 변환
+const parseLocalDate = (dateString) => {
+  if (!dateString) return null;
+
+  const match = String(dateString).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return null;
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(year, month - 1, day);
+
+  if (
+    date.getFullYear() !== year
+    || date.getMonth() !== month - 1
+    || date.getDate() !== day
+  ) {
+    return null;
+  }
+
+  return date;
+};
+
+const formatBalanceScheduleDate = (dateString) => {
+  const date = parseLocalDate(dateString);
+  if (!date) return dateString || '날짜 미지정';
+
+  const weekdayNames = ['일', '월', '화', '수', '목', '금', '토'];
+  return `${date.getFullYear()}.${String(date.getMonth() + 1).padStart(2, '0')}.${String(date.getDate()).padStart(2, '0')} (${weekdayNames[date.getDay()]})`;
+};
+
+const getBalanceDateStatus = (dateString) => {
+  const targetDate = parseLocalDate(dateString);
+  if (!targetDate) return '';
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  targetDate.setHours(0, 0, 0, 0);
+
+  const diffDays = Math.round(
+    (targetDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24)
+  );
+
+  if (diffDays < 0) return `기한 지남 D+${Math.abs(diffDays)}`;
+  if (diffDays === 0) return '오늘 지출 예정';
+  return `D-${diffDays}`;
+};
+
 // --- CSV 파싱 및 변환 유틸리티 ---
 const cleanCsvText = (value) => {
   if (value === null || value === undefined) return '';
@@ -723,6 +771,55 @@ export default function App() {
       .sort((a, b) => b.value - a.value);
   }, [items, summary.total]);
 
+  // 잔금일별 지출 예정 금액 계산
+  const balanceSchedule = useMemo(() => {
+    const scheduleMap = {};
+    let undatedAmount = 0;
+    let undatedCount = 0;
+
+    items.forEach((item) => {
+      const balance = Number(item.balance) || 0;
+      if (balance <= 0) return;
+
+      const balanceDate = String(item.balanceDate || '').trim();
+
+      if (!balanceDate || !parseLocalDate(balanceDate)) {
+        undatedAmount += balance;
+        undatedCount += 1;
+        return;
+      }
+
+      if (!scheduleMap[balanceDate]) {
+        scheduleMap[balanceDate] = {
+          date: balanceDate,
+          amount: 0,
+          count: 0,
+          items: []
+        };
+      }
+
+      scheduleMap[balanceDate].amount += balance;
+      scheduleMap[balanceDate].count += 1;
+      scheduleMap[balanceDate].items.push({
+        id: item.id,
+        title: item.title || '항목명 없음',
+        category: item.category || '기타',
+        balance
+      });
+    });
+
+    const datedSchedules = Object.values(scheduleMap)
+      .sort((a, b) => a.date.localeCompare(b.date));
+
+    return {
+      datedSchedules,
+      undatedAmount,
+      undatedCount,
+      scheduledAmount: datedSchedules.reduce((sum, schedule) => sum + schedule.amount, 0),
+      totalBalanceAmount: datedSchedules.reduce((sum, schedule) => sum + schedule.amount, 0) + undatedAmount
+    };
+  }, [items]);
+
   // --- 월별 모으기 계산 로직 ---
   const savingsPlan = useMemo(() => {
     const remainingCost = summary.expectedExpense; // 갚아야 할 잔금 총액
@@ -1335,6 +1432,100 @@ export default function App() {
           </div>
         </div>
       </div>
+
+      {/* 잔금일별 지출 예정 일정 */}
+      {(balanceSchedule.datedSchedules.length > 0 || balanceSchedule.undatedAmount > 0) && (
+        <div className="px-5 mt-4">
+          <div className="bg-white p-4 rounded-2xl border border-rose-100 shadow-sm">
+            <div className="flex justify-between items-start gap-3 mb-3">
+              <div>
+                <h4 className="text-sm font-black text-gray-800 flex items-center gap-1.5">
+                  <Calendar size={16} className="text-rose-500" /> 잔금일별 지출 예정
+                </h4>
+                <p className="text-[10px] text-gray-400 mt-1">
+                  같은 잔금일의 금액을 합산해서 표시합니다.
+                </p>
+              </div>
+              <div className="text-right shrink-0">
+                <p className="text-[10px] text-gray-400 font-semibold">전체 예정 잔금</p>
+                <p className="text-sm font-black text-rose-500">
+                  {formatNum(balanceSchedule.totalBalanceAmount)}원
+                </p>
+              </div>
+            </div>
+
+            <div className="space-y-2.5">
+              {balanceSchedule.datedSchedules.map((schedule) => {
+                const status = getBalanceDateStatus(schedule.date);
+                const isOverdue = status.startsWith('기한 지남');
+                const isToday = status === '오늘 지출 예정';
+
+                return (
+                  <div
+                    key={schedule.date}
+                    className={`rounded-xl border px-3.5 py-3 ${
+                      isOverdue
+                        ? 'bg-gray-50 border-gray-200'
+                        : isToday
+                          ? 'bg-rose-50 border-rose-200'
+                          : 'bg-orange-50/50 border-orange-100'
+                    }`}
+                  >
+                    <div className="flex justify-between items-center gap-3">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="text-xs font-black text-gray-800">
+                            {formatBalanceScheduleDate(schedule.date)}
+                          </span>
+                          <span className={`text-[9px] font-black px-2 py-0.5 rounded-full ${
+                            isOverdue
+                              ? 'bg-gray-200 text-gray-600'
+                              : isToday
+                                ? 'bg-rose-500 text-white'
+                                : 'bg-orange-100 text-orange-700'
+                          }`}>
+                            {status}
+                          </span>
+                        </div>
+                        <p className="text-[10px] text-gray-400 mt-1 truncate">
+                          {schedule.items.map(item => item.title).join(' · ')}
+                        </p>
+                      </div>
+
+                      <div className="text-right shrink-0">
+                        <p className="text-sm font-black text-rose-600">
+                          {formatNum(schedule.amount)}원
+                        </p>
+                        <p className="text-[9px] text-gray-400 font-semibold mt-0.5">
+                          {schedule.count}개 항목
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+
+              {balanceSchedule.undatedAmount > 0 && (
+                <div className="rounded-xl border border-dashed border-gray-300 bg-gray-50 px-3.5 py-3">
+                  <div className="flex justify-between items-center gap-3">
+                    <div>
+                      <p className="text-xs font-black text-gray-600 flex items-center gap-1.5">
+                        <AlertCircle size={13} className="text-gray-400" /> 잔금일 미지정
+                      </p>
+                      <p className="text-[10px] text-gray-400 mt-1">
+                        날짜가 없는 {balanceSchedule.undatedCount}개 항목
+                      </p>
+                    </div>
+                    <p className="text-sm font-black text-gray-600 shrink-0">
+                      {formatNum(balanceSchedule.undatedAmount)}원
+                    </p>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* 지출 비중 분석 통계 어코디언/차트 */}
       {items.length > 0 && (
