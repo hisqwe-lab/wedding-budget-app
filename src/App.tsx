@@ -585,6 +585,10 @@ export default function App() {
   const [csvImporting, setCsvImporting] = useState(false);
   const [csvFileName, setCsvFileName] = useState('');
 
+  // 전체 데이터 초기화 state
+  const [resetConfirm, setResetConfirm] = useState(false);
+  const [resettingData, setResettingData] = useState(false);
+
   // Custom Toast state
   const [toast, setToast] = useState({ visible: false, message: '', type: 'success' });
 
@@ -917,6 +921,118 @@ export default function App() {
     } finally {
       setCsvImporting(false);
       event.target.value = '';
+    }
+  };
+
+  // 현재 공유방에 입력된 모든 예산 데이터 초기화
+  const handleResetAllData = async () => {
+    if (!user) {
+      showToast('로그인이 완료되지 않았습니다.', 'error');
+      return;
+    }
+
+    if (resettingData) return;
+
+    // 실수로 누르는 것을 막기 위한 2단계 확인
+    if (!resetConfirm) {
+      setResetConfirm(true);
+      showToast('삭제 버튼을 한 번 더 누르면 현재 데이터가 모두 삭제됩니다.', 'error');
+      return;
+    }
+
+    setResettingData(true);
+
+    try {
+      const itemsRef = collection(
+        db,
+        'artifacts',
+        appId,
+        'public',
+        'data',
+        'weddingExpenses'
+      );
+
+      const snapshot = await getDocs(itemsRef);
+
+      // 다른 공유방 데이터는 건드리지 않고 현재 공유방 데이터만 삭제
+      const currentRoomDocs = snapshot.docs.filter((document) => {
+        const data = document.data();
+        return data.roomId === SHARED_ROOM_ID;
+      });
+
+      // Firestore batch 제한을 고려해 450개씩 나누어 삭제
+      const deleteChunkSize = 450;
+
+      for (
+        let startIndex = 0;
+        startIndex < currentRoomDocs.length;
+        startIndex += deleteChunkSize
+      ) {
+        const batch = writeBatch(db);
+        const deleteChunk = currentRoomDocs.slice(
+          startIndex,
+          startIndex + deleteChunkSize
+        );
+
+        deleteChunk.forEach((document) => {
+          batch.delete(document.ref);
+        });
+
+        await batch.commit();
+      }
+
+      // 금액 관련 설정도 0원으로 초기화하고 결혼 예정일은 유지
+      const settingsRef = doc(
+        db,
+        'artifacts',
+        appId,
+        'public',
+        'data',
+        'budgetSettings',
+        SHARED_ROOM_ID
+      );
+
+      await setDoc(settingsRef, {
+        expectedGift: 0,
+        currentSavings: 0,
+        weddingDate: weddingDate
+      }, { merge: true });
+
+      setExpectedGift('');
+      setCurrentSavings('');
+      setCsvFileName('');
+      setActiveTab('전체');
+      setResetConfirm(false);
+      setIsSettingsOpen(false);
+
+      if (currentRoomDocs.length > 0) {
+        showToast(
+          `현재 공유방의 예산 데이터 ${currentRoomDocs.length}건을 모두 삭제했습니다.`,
+          'success'
+        );
+      } else {
+        showToast('초기화할 예산 항목이 없어 금액 설정만 초기화했습니다.', 'success');
+      }
+    } catch (error) {
+      console.error('Reset All Data Error:', error);
+      console.error('Firebase error code:', error?.code);
+      console.error('Firebase error message:', error?.message);
+
+      if (error?.code === 'permission-denied') {
+        showToast(
+          '데이터 삭제 권한이 없습니다. Firestore 규칙의 삭제 권한을 확인해 주세요.',
+          'error'
+        );
+      } else if (error?.code === 'unauthenticated') {
+        showToast('Firebase 로그인이 완료되지 않았습니다.', 'error');
+      } else {
+        showToast(
+          error?.message || '데이터를 초기화하는 중 오류가 발생했습니다.',
+          'error'
+        );
+      }
+    } finally {
+      setResettingData(false);
     }
   };
 
@@ -1357,14 +1473,14 @@ export default function App() {
       {/* Drawer: Settings & Admin Tool */}
       {isSettingsOpen && (
         <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center">
-          <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setIsSettingsOpen(false)}></div>
+          <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => { setResetConfirm(false); setIsSettingsOpen(false); }}></div>
           <div className="bg-white w-full max-w-md rounded-t-[2.5rem] shadow-2xl relative flex flex-col p-6 animate-slide-up">
             <div className="flex justify-between items-center mb-6 pb-2 border-b border-gray-50">
               <h2 className="text-lg font-black text-gray-900 flex items-center gap-1.5">
                 <Settings size={20} className="text-pink-500" /> 세부 환경 설정
               </h2>
               <button 
-                onClick={() => setIsSettingsOpen(false)} 
+                onClick={() => { setResetConfirm(false); setIsSettingsOpen(false); }} 
                 className="p-2 bg-gray-100 rounded-full text-gray-500 hover:bg-gray-200 transition-colors"
               >
                 <X size={18} />
@@ -1448,6 +1564,35 @@ export default function App() {
                   className="w-full bg-amber-600 hover:bg-amber-700 text-white font-bold py-2.5 px-4 rounded-xl text-xs transition-colors shadow-sm"
                 >
                   기존 데이터 공유방으로 복사 실행
+                </button>
+              </div>
+
+              {/* Reset All Data Area */}
+              <div className="bg-rose-50 rounded-2xl p-4.5 border border-rose-200">
+                <span className="text-xs font-bold text-rose-800 flex items-center gap-1.5 mb-1">
+                  🗑️ 현재 데이터 전체 초기화
+                </span>
+                <p className="text-[11px] text-rose-700 leading-relaxed mb-3">
+                  현재 공유방에 등록된 지출 항목 전체와 현재 모은 금액, 예상 축의금을 삭제합니다.
+                  결혼 예정일은 그대로 유지됩니다. 삭제한 데이터는 복구할 수 없습니다.
+                </p>
+                <button
+                  onClick={handleResetAllData}
+                  disabled={resettingData}
+                  className={`w-full text-white font-black py-2.5 px-4 rounded-xl text-xs transition-colors shadow-sm flex items-center justify-center gap-1.5 ${
+                    resettingData
+                      ? 'bg-gray-400 cursor-not-allowed'
+                      : resetConfirm
+                        ? 'bg-rose-700 hover:bg-rose-800 animate-pulse'
+                        : 'bg-rose-500 hover:bg-rose-600'
+                  }`}
+                >
+                  <Trash2 size={14} />
+                  {resettingData
+                    ? '데이터 초기화 중...'
+                    : resetConfirm
+                      ? `한 번 더 누르면 ${items.length}건이 삭제됩니다`
+                      : `현재 데이터 전체 삭제 (${items.length}건)`}
                 </button>
               </div>
             </div>
